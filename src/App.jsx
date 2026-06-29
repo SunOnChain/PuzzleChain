@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { verifyMessage } from "ethers";
+import { isMintConfigured, mintAchievement } from "./lib/nft.js";
 
 const BG    = "#F5F0E8";
 const GOLD  = "#F5A623";
@@ -37,13 +38,16 @@ const PIECES = [
 ];
 
 const MONAD = {
-  chainId:"0x279F", chainName:"Monad Testnet",
+  chainId: import.meta.env.VITE_MONAD_CHAIN_ID || "0x8F", // Monad Mainnet = chain id 143
+  chainName: "Monad",
   nativeCurrency:{name:"MON",symbol:"MON",decimals:18},
-  rpcUrls:["https://testnet-rpc.monad.xyz"],
-  blockExplorerUrls:["https://testnet.monadexplorer.com"],
+  rpcUrls:[import.meta.env.VITE_MONAD_RPC_URL || "https://rpc.monad.xyz"],
+  blockExplorerUrls:[import.meta.env.VITE_MONAD_EXPLORER_URL || "https://monadscan.com"],
 };
-// Wallet addresses (lowercase) granted admin access. Add your own wallet here to unlock the Admin Panel.
-const ADMIN_WALLETS = [];
+// Wallet address(es) granted admin access, configured via VITE_ADMIN_WALLET (comma-separated
+// for more than one). Never hardcode an address here — set it in your deploy environment instead.
+const ADMIN_WALLETS = (import.meta.env.VITE_ADMIN_WALLET || "")
+  .split(",").map(a=>a.trim().toLowerCase()).filter(Boolean);
 
 const S = {
   get:(k,d=null)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):d;}catch{return d;}},
@@ -95,11 +99,6 @@ async function connectWallet(){
   catch(e){ if(e.code===4902) await window.ethereum.request({method:"wallet_addEthereumChain",params:[MONAD]}); else throw e; }
   return addr;
 }
-async function submitScore(name,pieces,secs,addr){
-  const d=`PuzzleChain|${name}|${pieces}pcs|${secs}s|${addr}|${Date.now()}`;
-  const h="0x"+[...new TextEncoder().encode(d)].map(b=>b.toString(16).padStart(2,"0")).join("");
-  return window.ethereum.request({method:"eth_sendTransaction",params:[{from:addr,to:addr,value:"0x0",data:h}]});
-}
 
 // ─────────────────────────────────────
 // WALLET AUTHENTICATION (replaces username/password)
@@ -112,7 +111,7 @@ function buildSiweMessage(address,nonce){
 }
 
 async function signInWithWallet(){
-  const address=await connectWallet(); // requests accounts + switches to Monad testnet
+  const address=await connectWallet(); // requests accounts + switches to Monad Mainnet
   const addrLower=address.toLowerCase();
   const nonce=Math.random().toString(36).slice(2,10)+Date.now().toString(36);
   const message=buildSiweMessage(address,nonce);
@@ -135,14 +134,21 @@ async function signInWithWallet(){
   const usersByWallet=S.get("usersByWallet",{});
   let record=usersByWallet[addrLower];
   let isNew=false;
+  const isAdminNow=ADMIN_WALLETS.includes(addrLower);
   if(!record){
     isNew=true;
     record={
       address, addressLower:addrLower,
       username:"", displayName:"", bio:"", pfp:"",
-      isAdmin:ADMIN_WALLETS.includes(addrLower),
+      isAdmin:isAdminNow,
       createdAt:Date.now(),
     };
+    usersByWallet[addrLower]=record;
+    S.set("usersByWallet",usersByWallet);
+  }else if(record.isAdmin!==isAdminNow){
+    // Admin status is config-driven (VITE_ADMIN_WALLET), so keep it fresh on every
+    // sign-in rather than freezing whatever it was when the account was first created.
+    record.isAdmin=isAdminNow;
     usersByWallet[addrLower]=record;
     S.set("usersByWallet",usersByWallet);
   }
@@ -167,6 +173,12 @@ function getSessionUser(){
   const usersByWallet=S.get("usersByWallet",{});
   const record=usersByWallet[session.address];
   if(!record) return null;
+  const isAdminNow=ADMIN_WALLETS.includes(session.address);
+  if(record.isAdmin!==isAdminNow){
+    record.isAdmin=isAdminNow;
+    usersByWallet[session.address]=record;
+    S.set("usersByWallet",usersByWallet);
+  }
   return {...record};
 }
 
@@ -512,27 +524,44 @@ function PuzzleGame({puzzle,opt,onBack,user}){
 }
 
 function ChainButton({puzzle,pieces,secs,user}){
-  const [wallet,setWallet]=useState(S.get("wallet"));
-  const [tx,setTx]=useState(null);
-  const [loading,setLoading]=useState(false);
-  const chain=async()=>{
-    setLoading(true);
+  const [state,setState]=useState("idle"); // idle | uploading | minting | done | error
+  const [result,setResult]=useState(null);
+  const [err,setErr]=useState("");
+  const configured=isMintConfigured();
+
+  const mint=async()=>{
+    setErr(""); setState("uploading");
     try{
-      let a=wallet;if(!a){a=await connectWallet();setWallet(a);S.set("wallet",a);}
-      const hash=await submitScore(puzzle.title,pieces,secs,a);setTx(hash);
+      let address=user?.address;
+      if(!address){
+        const u=await signInWithWallet(); // also syncs the app-wide session via "walletchange"
+        address=u.address;
+      }
+      setState("minting");
+      const {txHash,tokenId,tokenURI}=await mintAchievement({puzzle,pieces,secs,address});
       const lb=S.get("leaderboard",[]);
       const e=lb.find(x=>x.puzzleId===puzzle.id&&x.secs===secs&&!x.onChain);
-      if(e){e.onChain=true;e.txHash=hash;e.mintedAt=Date.now();S.set("leaderboard",lb);}
-      addLog({type:"score_submitted",user:user?.username||"Guest",puzzle:puzzle.title,pieces,secs,txHash:hash});
-    }catch(e){alert(e.message);}
-    setLoading(false);
+      if(e){e.onChain=true;e.txHash=txHash;e.tokenId=tokenId;e.tokenURI=tokenURI;e.mintedAt=Date.now();S.set("leaderboard",lb);}
+      addLog({type:"nft_minted",user:user?.username||shortAddr(address),puzzle:puzzle.title,pieces,secs,txHash,tokenId});
+      setResult({tokenId}); setState("done");
+    }catch(e){
+      setErr(e.message||"Mint failed."); setState("error");
+    }
   };
-  if(tx) return <span style={{fontSize:12,color:"#86EFAC",fontWeight:600,flexShrink:0}}>⛓ Recorded!</span>;
+
+  if(state==="done") return <span style={{fontSize:12,color:"#86EFAC",fontWeight:600,flexShrink:0}}>⛓ Minted{result?.tokenId!=null?` #${result.tokenId}`:""}!</span>;
+
+  if(!configured) return <span style={{fontSize:11,color:MID,fontWeight:600,flexShrink:0,textAlign:"right"}}>NFT minting coming soon</span>;
+
+  const busy=state==="uploading"||state==="minting";
   return(
-    <button onClick={chain} disabled={loading}
-      style={{background:GOLD,color:DARK,border:"none",borderRadius:8,padding:"7px 12px",fontWeight:700,fontSize:12,cursor:"pointer",flexShrink:0,opacity:loading?.7:1}}>
-      {loading?"...":"⛓ On-chain"}
-    </button>
+    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3,flexShrink:0}}>
+      <button onClick={mint} disabled={busy}
+        style={{background:GOLD,color:DARK,border:"none",borderRadius:8,padding:"7px 12px",fontWeight:700,fontSize:12,cursor:"pointer",opacity:busy?.7:1}}>
+        {state==="uploading"?"Uploading...":state==="minting"?"Minting...":"⛓ Mint NFT"}
+      </button>
+      {err&&<span style={{fontSize:10,color:"#EF4444",fontWeight:600,maxWidth:150,textAlign:"right"}}>{err}</span>}
+    </div>
   );
 }
 
@@ -602,7 +631,7 @@ function TopNav({page,setPage,user,setAuthOpen,onLogout}){
                       </div>
                     </div>
                     <div style={{padding:"8px 12px",borderBottom:BORDER,marginBottom:4}}>
-                      <div style={{fontSize:11,fontWeight:600,color:MID,marginBottom:4}}>WALLET · MONAD TESTNET</div>
+                      <div style={{fontSize:11,fontWeight:600,color:MID,marginBottom:4}}>WALLET · MONAD MAINNET</div>
                       <span style={{fontFamily:"monospace",fontSize:11,color:DARK}}>{shortAddr(user.address)}</span>
                     </div>
                     {[
@@ -1486,7 +1515,7 @@ function SettingsPage({user,onLogin,onLogout}){
     <div style={{maxWidth:500,margin:"0 auto",padding:"28px 16px 40px"}}>
       <h2 style={{fontWeight:800,fontSize:24,color:DARK,margin:"0 0 22px"}}>Settings</h2>
       <div style={{background:WHITE,border:BORDER,borderRadius:15,padding:22,boxShadow:"0 1px 6px rgba(0,0,0,.06)"}}>
-        <h3 style={{fontWeight:700,fontSize:15,color:DARK,margin:"0 0 8px"}}>⛓️ Wallet — Monad Testnet</h3>
+        <h3 style={{fontWeight:700,fontSize:15,color:DARK,margin:"0 0 8px"}}>⛓️ Wallet — Monad Mainnet</h3>
         <p style={{color:MID,fontSize:13,lineHeight:1.6,margin:"0 0 14px"}}>Your wallet is your PuzzleChain account — connecting it (and signing a verification message) signs you in, and also lets you record puzzle scores on-chain.</p>
         {err&&<p style={{color:"#EF4444",fontWeight:600,fontSize:12,margin:"0 0 11px"}}>⚠️ {err}</p>}
         {user?(
@@ -1706,7 +1735,7 @@ export default function App(){
       <BottomTabs page={page} setPage={setPage} user={user} setAuthOpen={setAuthOpen}/>
 
       <footer className="desktop-second-nav" style={{borderTop:BORDER,padding:"14px 24px",textAlign:"center",background:WHITE}}>
-        <span style={{color:MID,fontSize:12}}>🧩 PuzzleChain · Monad Testnet · {new Date().getFullYear()}</span>
+        <span style={{color:MID,fontSize:12}}>🧩 PuzzleChain · Monad Mainnet · {new Date().getFullYear()}</span>
       </footer>
 
       {authOpen&&<AuthModal onClose={()=>setAuthOpen(false)} onLogin={onLogin}/>}
