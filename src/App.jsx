@@ -407,9 +407,14 @@ function PuzzleGame({puzzle,opt,onBack,user}){
         username:user?.username||user?.displayName||(user?.address?shortAddr(user.address):"Guest"),
         address:user?.address||null, ts:Date.now(),
       };
-      // Write to DB (shared, cross-device). Store the returned UUID so
-      // ChainButton can update this row when the mint completes.
-      DB.addSolve(entry).then(row=>{ if(row?.id) solveIdRef.current=row.id; }).catch(()=>{});
+      // Only write to the shared DB when a wallet is connected — the DB requires a
+      // real address to associate the record with the user's account across devices.
+      // Guest solves (no wallet) simply don't persist to the shared DB.
+      if(entry.address){
+        DB.addSolve(entry)
+          .then(row=>{ if(row?.id) solveIdRef.current=row.id; console.log("[DB] solve saved, id=",row?.id); })
+          .catch(e=>console.error("[DB] addSolve failed:",e?.message||e));
+      }
     }
   },[doSnap,draw,timer,puzzle,n,user]);
 
@@ -550,11 +555,15 @@ function ChainButton({puzzle,pieces,secs,user,solveIdRef}){
       DB.addLeaderboardEntry({
         puzzleId:puzzle.id, puzzleTitle:puzzle.title, pieces, secs,
         username, address, txHash, tokenId, tokenURI, mintedAt, ts:Date.now(),
-      }).catch(()=>{});
+      }).then(()=>console.log("[DB] leaderboard entry saved")).catch(e=>console.error("[DB] addLeaderboardEntry failed:",e?.message||e));
       // Mark the solve_history row as on-chain (if we have its DB id).
       const solveId=solveIdRef?.current;
       if(solveId){
-        DB.markSolveOnChain(solveId,{txHash,tokenId,tokenURI,mintedAt}).catch(()=>{});
+        DB.markSolveOnChain(solveId,{txHash,tokenId,tokenURI,mintedAt})
+          .then(()=>console.log("[DB] solve marked on-chain, id=",solveId))
+          .catch(e=>console.error("[DB] markSolveOnChain failed:",e?.message||e));
+      }else{
+        console.warn("[DB] no solveId ref — markSolveOnChain skipped (solve was guest or DB write failed earlier)");
       }
       addLog({type:"nft_minted",user:username,puzzle:puzzle.title,pieces,secs,txHash,tokenId});
       setResult({tokenId}); setState("done");
@@ -1557,9 +1566,19 @@ export default function App(){
   const [gameKey,setGameKey]=useState(0);
   const [sort,setSort]=useState("Newest First");
 
-  // One-time migration: push any existing localStorage data (leaderboard, solve history,
-  // community puzzles) into Supabase so it's globally visible. Runs once per browser,
-  // then marks itself done. If it fails for any reason the app continues normally.
+  // DB connectivity check — logs to console so you can see immediately on load
+  // whether the database is reachable. Check browser DevTools → Console after deploy.
+  useEffect(()=>{
+    fetch("/api/db",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"ping"})})
+      .then(r=>r.json())
+      .then(d=>{
+        if(d.error&&d.error.includes("not configured")) console.error("[DB] ❌ NOT CONFIGURED — set SUPABASE_URL and SUPABASE_SERVICE_KEY in Vercel environment variables, then redeploy.",d.error);
+        else if(d.error) console.warn("[DB] ⚠️ ping returned an error (DB may still work for valid actions):",d.error);
+        else console.log("[DB] ✅ connected");
+      })
+      .catch(e=>console.error("[DB] ❌ /api/db unreachable:",e?.message||e));
+  },[]);
+
   useEffect(()=>{ migrateLocalStorageToDb(); },[]);
 
   // Listen for mobile sort change

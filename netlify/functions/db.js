@@ -9,8 +9,7 @@ exports.handler = async function (event) {
   const KEY  = process.env.SUPABASE_SERVICE_KEY;
 
   if (!URL || !KEY) {
-    // DB not configured — callers handle empty results gracefully.
-    return { statusCode: 200, body: JSON.stringify({ rows: [], counts: {}, row: null, _unconfigured: true }) };
+    return { statusCode: 503, body: JSON.stringify({ error: "Database not configured: SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment variables." }) };
   }
 
   let body;
@@ -246,6 +245,9 @@ async function dispatch(URL, KEY, { action, ...p }) {
       }]);
       return { ok: true };
     }
+
+    case "ping":
+      return { ok: true, ts: Date.now() };
 
     default:
       throw new Error(`Unknown action: ${action}`);

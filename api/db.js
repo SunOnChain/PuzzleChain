@@ -10,13 +10,12 @@ export default async function handler(req, res) {
   const KEY  = process.env.SUPABASE_SERVICE_KEY;
 
   if (!URL || !KEY) {
-    // DB not configured — callers handle empty results gracefully.
-    return res.status(200).json({ rows: [], counts: {}, row: null, _unconfigured: true });
+    return res.status(503).json({ error: "Database not configured: SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment variables." });
   }
 
   let body;
   try { body = JSON.parse(event.body || "{}"); }
-  catch { return { statusCode: 400, body: JSON.stringify({ error: "Invalid JSON" }) }; }
+  catch { return res.status(400).json({ error: "Invalid JSON" }); }
 
   try {
     const result = await dispatch(URL, KEY, body);
@@ -247,6 +246,9 @@ async function dispatch(URL, KEY, { action, ...p }) {
       }]);
       return { ok: true };
     }
+
+    case "ping":
+      return { ok: true, ts: Date.now() };
 
     default:
       throw new Error(`Unknown action: ${action}`);
