@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { verifyMessage } from "ethers";
 import { isMintConfigured, mintAchievement } from "./lib/nft.js";
+import { DB, migrateLocalStorageToDb } from "./lib/db.js";
 
 const BG    = "#F5F0E8";
 const GOLD  = "#F5A623";
@@ -17,7 +18,7 @@ const PUZZLES = [
   {id:4,  url:"https://images.unsplash.com/photo-1426604966848-d7adac402bff?w=900&q=85", title:"Forest Path",      desc:"A serene path winding through a lush green forest.",               tags:["nature","forest","green"]},
   {id:5,  url:"https://images.unsplash.com/photo-1472214103451-9374bd1c798e?w=900&q=85", title:"Mountain Lake",    desc:"Crystal clear alpine lake reflecting snow-capped mountains.",      tags:["mountain","lake","alpine"]},
   {id:6,  url:"https://images.unsplash.com/photo-1518020382113-a7e8fc38eac9?w=900&q=85", title:"Golden Gate",      desc:"San Francisco's iconic suspension bridge in morning fog.",          tags:["bridge","usa","sanfrancisco"]},
-  {id:7,  url:"https://images.unsplash.com/photo-1579762593131-b8945254345a?w=900&q=85", title:"Northern Lights",  desc:"The breathtaking aurora borealis dancing across arctic skies.",    tags:["aurora","sky","night"]},
+  {id:7,  url:"https://images.unsplash.com/photo-1571371867188-fdc3f1f8e62d?w=900&q=85", title:"Northern Lights",  desc:"The breathtaking aurora borealis dancing across arctic skies.",    tags:["aurora","sky","night"]},
   {id:8,  url:"https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?w=900&q=85", title:"New York City",    desc:"The city that never sleeps, a concrete jungle of skyscrapers.",    tags:["newyork","city","skyline"]},
   {id:9,  url:"https://images.unsplash.com/photo-1505118380757-91f5f5632de0?w=900&q=85", title:"Ocean Sunset",     desc:"Golden hour over the ocean with waves gently lapping the shore.", tags:["ocean","sunset","beach"]},
   {id:10, url:"https://images.unsplash.com/photo-1587595431973-160d0d94add1?w=900&q=85", title:"Machu Picchu",     desc:"The lost city of the Incas high in the Andes mountains of Peru.",  tags:["peru","ruins","inca"]},
@@ -273,12 +274,6 @@ function PuzzleGame({puzzle,opt,onBack,user}){
   const doneRef=useRef(false);
   useEffect(()=>{doneRef.current=done;},[done]);
 
-  useEffect(()=>{
-    const obs=new ResizeObserver(()=>{if(imgReady&&!doneRef.current)initGame();});
-    if(wrapRef.current) obs.observe(wrapRef.current);
-    return()=>obs.disconnect();
-  },[imgReady,initGame]);
-
   // Switching between fullscreen/normal layouts swaps the canvas to a new DOM node
   // (different JSX tree shape), which loses whatever was drawn on it. Re-measure the
   // new node and redraw the *existing* pieces (scaled to fit) — never re-randomize.
@@ -323,7 +318,18 @@ function PuzzleGame({puzzle,opt,onBack,user}){
     draw();
   },[draw]);
 
-  useEffect(()=>{relayout();},[fullscreen,relayout]);
+  // Single source of truth for "the canvas container changed size" — covers both
+  // ordinary window resizes AND toggling fullscreen (which swaps in a whole new
+  // wrapper element). Re-created whenever `fullscreen` changes so it's always bound
+  // to the wrapper that's actually on screen, never a stale/detached one. Always
+  // rescales the existing pieces in place; it must never re-randomize the board.
+  useEffect(()=>{
+    if(!imgReady) return;
+    relayout(); // sync pass for whichever wrapper node is current right now
+    const obs=new ResizeObserver(()=>relayout());
+    if(wrapRef.current) obs.observe(wrapRef.current);
+    return()=>obs.disconnect();
+  },[imgReady,fullscreen,relayout]);
 
   const getXY=useCallback((e)=>{
     const canvas=canvasRef.current; if(!canvas) return{x:0,y:0};
@@ -381,6 +387,8 @@ function PuzzleGame({puzzle,opt,onBack,user}){
     draw();
   },[getXY,draw]);
 
+  const solveIdRef=useRef(null); // DB UUID of the just-completed solve, used by ChainButton
+
   const onUp=useCallback(()=>{
     if(!dragRef.current) return;
     const gid=dragRef.current.gid; dragRef.current=null;
@@ -392,19 +400,16 @@ function PuzzleGame({puzzle,opt,onBack,user}){
     setProgress(prog);
     if(groups.length===1&&!doneRef.current){
       timer.stop(); setDone(true);
+      solveIdRef.current=null;
       setCompletionBar({secs:timer.secs,pieces:n});
-      const lb=S.get("leaderboard",[]);
-      lb.push({puzzleId:puzzle.id,puzzleTitle:puzzle.title,pieces:n,secs:timer.secs,username:user?.username||user?.displayName||(user?.address?shortAddr(user.address):"Guest"),address:user?.address||null,ts:Date.now(),onChain:false});
-      lb.sort((a,b)=>a.secs-b.secs); S.set("leaderboard",lb);
-      if(user){
-        const usersByWallet=S.get("usersByWallet",{});
-        const key=user.addressLower||user.address?.toLowerCase();
-        if(key&&usersByWallet[key]){
-          usersByWallet[key].records=usersByWallet[key].records||[];
-          usersByWallet[key].records.push({puzzleId:puzzle.id,puzzleTitle:puzzle.title,pieces:n,secs:timer.secs,ts:Date.now()});
-          S.set("usersByWallet",usersByWallet);
-        }
-      }
+      const entry={
+        puzzleId:puzzle.id, puzzleTitle:puzzle.title, pieces:n, secs:timer.secs,
+        username:user?.username||user?.displayName||(user?.address?shortAddr(user.address):"Guest"),
+        address:user?.address||null, ts:Date.now(),
+      };
+      // Write to DB (shared, cross-device). Store the returned UUID so
+      // ChainButton can update this row when the mint completes.
+      DB.addSolve(entry).then(row=>{ if(row?.id) solveIdRef.current=row.id; }).catch(()=>{});
     }
   },[doSnap,draw,timer,puzzle,n,user]);
 
@@ -458,7 +463,7 @@ function PuzzleGame({puzzle,opt,onBack,user}){
               <div style={{fontWeight:700,fontSize:13}}>Puzzle Complete!</div>
               <div style={{fontSize:11,color:"rgba(255,255,255,.6)",marginTop:1}}>{fmt(completionBar.secs)} · {n} pieces</div>
             </div>
-            <ChainButton puzzle={puzzle} pieces={n} secs={completionBar.secs} user={user}/>
+            <ChainButton puzzle={puzzle} pieces={n} secs={completionBar.secs} user={user} solveIdRef={solveIdRef}/>
             <button onClick={()=>setCompletionBar(null)} style={{background:"rgba(255,255,255,.15)",border:"none",borderRadius:6,width:26,height:26,cursor:"pointer",color:WHITE,fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>×</button>
           </div>
         )}
@@ -515,7 +520,7 @@ function PuzzleGame({puzzle,opt,onBack,user}){
             <div style={{fontWeight:700,fontSize:13}}>Puzzle Complete!</div>
             <div style={{fontSize:11,color:"rgba(255,255,255,.6)",marginTop:1}}>{fmt(completionBar.secs)} · {n} pieces · {puzzle.title}</div>
           </div>
-          <ChainButton puzzle={puzzle} pieces={n} secs={completionBar.secs} user={user}/>
+          <ChainButton puzzle={puzzle} pieces={n} secs={completionBar.secs} user={user} solveIdRef={solveIdRef}/>
           <button onClick={()=>setCompletionBar(null)} style={{background:"rgba(255,255,255,.15)",border:"none",borderRadius:6,width:26,height:26,cursor:"pointer",color:WHITE,fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>×</button>
         </div>
       )}
@@ -523,7 +528,7 @@ function PuzzleGame({puzzle,opt,onBack,user}){
   );
 }
 
-function ChainButton({puzzle,pieces,secs,user}){
+function ChainButton({puzzle,pieces,secs,user,solveIdRef}){
   const [state,setState]=useState("idle"); // idle | uploading | minting | done | error
   const [result,setResult]=useState(null);
   const [err,setErr]=useState("");
@@ -534,15 +539,24 @@ function ChainButton({puzzle,pieces,secs,user}){
     try{
       let address=user?.address;
       if(!address){
-        const u=await signInWithWallet(); // also syncs the app-wide session via "walletchange"
+        const u=await signInWithWallet();
         address=u.address;
       }
       setState("minting");
       const {txHash,tokenId,tokenURI}=await mintAchievement({puzzle,pieces,secs,address});
-      const lb=S.get("leaderboard",[]);
-      const e=lb.find(x=>x.puzzleId===puzzle.id&&x.secs===secs&&!x.onChain);
-      if(e){e.onChain=true;e.txHash=txHash;e.tokenId=tokenId;e.tokenURI=tokenURI;e.mintedAt=Date.now();S.set("leaderboard",lb);}
-      addLog({type:"nft_minted",user:user?.username||shortAddr(address),puzzle:puzzle.title,pieces,secs,txHash,tokenId});
+      const mintedAt=Date.now();
+      const username=user?.username||user?.displayName||shortAddr(address);
+      // Write the on-chain entry to the shared leaderboard DB.
+      DB.addLeaderboardEntry({
+        puzzleId:puzzle.id, puzzleTitle:puzzle.title, pieces, secs,
+        username, address, txHash, tokenId, tokenURI, mintedAt, ts:Date.now(),
+      }).catch(()=>{});
+      // Mark the solve_history row as on-chain (if we have its DB id).
+      const solveId=solveIdRef?.current;
+      if(solveId){
+        DB.markSolveOnChain(solveId,{txHash,tokenId,tokenURI,mintedAt}).catch(()=>{});
+      }
+      addLog({type:"nft_minted",user:username,puzzle:puzzle.title,pieces,secs,txHash,tokenId});
       setResult({tokenId}); setState("done");
     }catch(e){
       setErr(e.message||"Mint failed."); setState("error");
@@ -748,6 +762,8 @@ function BottomTabs({page,setPage,user,setAuthOpen}){
 function GalleryPage({setPage,setSelPuzzle,sort}){
   const [search,setSearch]=useState("");
   const [pg,setPg]=useState(1);
+  const [dbPuzzles,setDbPuzzles]=useState([]);
+  const [solveCounts,setSolveCounts]=useState({});
   const PER=12;
 
   useEffect(()=>{
@@ -756,11 +772,20 @@ function GalleryPage({setPage,setSelPuzzle,sort}){
     return()=>window.removeEventListener("pzsearch",h);
   },[]);
 
-  const userPuzzles=S.get("userPuzzles",[]);
+  // Load community puzzles and solve counts from the shared DB on mount.
+  useEffect(()=>{
+    DB.getCommunityPuzzles().then(rows=>{
+      setDbPuzzles(rows.map(r=>({
+        id:r.id, url:r.url, title:r.title, desc:r.description||"",
+        tags:r.tags||[], author:r.author, authorName:r.author_name, createdAt:r.created_at,
+      })));
+    }).catch(()=>{});
+    DB.getPuzzleSolveCounts().then(setSolveCounts).catch(()=>{});
+  },[]);
+
   const banned=S.get("bannedUsers",[]);
-  const lb=S.get("leaderboard",[]);
-  let all=[...PUZZLES,...userPuzzles].filter(p=>!banned.includes(p.author));
-  const solvedCount=id=>lb.filter(r=>r.puzzleId===id).length;
+  let all=[...PUZZLES,...dbPuzzles].filter(p=>!banned.includes(p.author));
+  const solvedCount=id=>solveCounts[id]||0;
   if(sort==="Newest First") all=[...all].sort((a,b)=>(b.createdAt||b.id)-(a.createdAt||a.id));
   else if(sort==="Oldest First") all=[...all].sort((a,b)=>(a.createdAt||a.id)-(b.createdAt||b.id));
   else if(sort==="Most Solved") all=[...all].sort((a,b)=>solvedCount(b.id)-solvedCount(a.id));
@@ -855,21 +880,28 @@ function PgBtn({children,onClick,active,disabled}){
 }
 
 // ─────────────────────────────────────
-// ─────────────────────────────────────
 // PER-PUZZLE LEADERBOARD
-// Independent per piece-count. Only successful on-chain mints are eligible.
-// Ranked by fastest solve time, ties broken by earlier mint timestamp.
+// Reads from the shared DB. Only on-chain entries are in the leaderboard table.
+// Rankings (best per wallet, tie-break by earlier mint) are computed client-side.
 // ─────────────────────────────────────
-function rankPuzzleLeaderboard(puzzleId,pieces){
-  const eligible=S.get("leaderboard",[]).filter(e=>e.puzzleId===puzzleId&&e.pieces===pieces&&e.onChain);
-  const tieBreak=(a,b)=>a.secs-b.secs||(a.mintedAt||a.ts)-(b.mintedAt||b.ts);
-  const best=new Map(); // one row per player — their fastest eligible mint
-  for(const e of eligible){
-    const key=e.address?e.address.toLowerCase():`guest:${e.username||"Guest"}`;
+function rankRows(rows){
+  const tieBreak=(a,b)=>a.secs-b.secs||(a.minted_at||a.ts||0)-(b.minted_at||b.ts||0);
+  const best=new Map();
+  for(const e of rows){
+    const key=(e.address||`guest:${e.username||"Guest"}`).toLowerCase();
     const cur=best.get(key);
     if(!cur||tieBreak(e,cur)<0) best.set(key,e);
   }
   return [...best.values()].sort(tieBreak);
+}
+// Normalise a DB leaderboard row to the shape the rest of the UI already expects.
+function normRow(r){
+  return{
+    puzzleId:r.puzzle_id, puzzleTitle:r.puzzle_title, pieces:r.pieces, secs:r.secs,
+    username:r.username, address:r.address, onChain:true,
+    txHash:r.tx_hash, tokenId:r.token_id, tokenURI:r.token_uri,
+    mintedAt:r.minted_at, ts:r.ts,
+  };
 }
 
 function LbRow({rank,entry,usersByWallet,mine}){
@@ -894,10 +926,18 @@ function LbRow({rank,entry,usersByWallet,mine}){
 function PuzzleLeaderboardModal({puzzle,initialPieces,user,onClose}){
   const [pieces,setPieces]=useState(initialPieces);
   const [pcOpen,setPcOpen]=useState(false);
+  const [ranked,setRanked]=useState([]);
   const usersByWallet=S.get("usersByWallet",{});
-  const ranked=rankPuzzleLeaderboard(puzzle.id,pieces);
+
+  useEffect(()=>{
+    setRanked([]);
+    DB.getPuzzleLeaderboard(puzzle.id,pieces)
+      .then(rows=>setRanked(rankRows(rows.map(normRow))))
+      .catch(()=>{});
+  },[puzzle.id,pieces]);
+
   const myKey=user?.address?user.address.toLowerCase():null;
-  const myIdx=myKey?ranked.findIndex(e=>(e.address?e.address.toLowerCase():null)===myKey):-1;
+  const myIdx=myKey?ranked.findIndex(e=>(e.address||"").toLowerCase()===myKey):-1;
   const top100=ranked.slice(0,100);
   const showExtra=myIdx>=100;
 
@@ -959,12 +999,20 @@ function DetailPage({puzzle,setPage,onPlay,user}){
   const [aboutOpen,setAboutOpen]=useState(false);
   const [lbOpen,setLbOpen]=useState(false);
   const [liked,setLiked]=useState((S.get("liked",[])||[]).includes(puzzle.id));
+  const [ranked,setRanked]=useState([]);
   const lbN=pick?.n||PIECES[0].n;
   const usersByWallet=S.get("usersByWallet",{});
-  const ranked=rankPuzzleLeaderboard(puzzle.id,lbN);
+
+  useEffect(()=>{
+    setRanked([]);
+    DB.getPuzzleLeaderboard(puzzle.id,lbN)
+      .then(rows=>setRanked(rankRows(rows.map(normRow))))
+      .catch(()=>{});
+  },[puzzle.id,lbN]);
+
   const top3=ranked.slice(0,3);
   const myKey=user?.address?user.address.toLowerCase():null;
-  const myIdx=myKey?ranked.findIndex(e=>(e.address?e.address.toLowerCase():null)===myKey):-1;
+  const myIdx=myKey?ranked.findIndex(e=>(e.address||"").toLowerCase()===myKey):-1;
   const showMyRow=myIdx>=3;
 
   const share=()=>{
@@ -1073,179 +1121,16 @@ function fmtDelta(secs){
 }
 
 function HallOfFamePage({setPage}){
-  const leaderboard=S.get("leaderboard",[]);
-  const usersByWallet=S.get("usersByWallet",{});
-  const allPuzzles=[...PUZZLES,...S.get("userPuzzles",[])];
-  const now=Date.now(); const WEEK=7*24*60*60*1000; const since=now-WEEK;
-  const playerKey=e=>e.address?e.address.toLowerCase():`guest:${e.username||"Guest"}`;
-
-  // ---- top stat cards ----
-  const totalSolved=leaderboard.length;
-  const solvedThisWeek=leaderboard.filter(e=>e.ts>=since).length;
-  const firstSeen=new Map();
-  for(const e of leaderboard){const k=playerKey(e);if(!firstSeen.has(k)||e.ts<firstSeen.get(k))firstSeen.set(k,e.ts);}
-  const totalPlayers=firstSeen.size;
-  const newPlayersThisWeek=[...firstSeen.values()].filter(ts=>ts>=since).length;
-  const avgSecs=totalSolved?Math.round(leaderboard.reduce((a,e)=>a+e.secs,0)/totalSolved):0;
-  const recentE=leaderboard.filter(e=>e.ts>=since), olderE=leaderboard.filter(e=>e.ts<since);
-  const avgRecent=recentE.length?recentE.reduce((a,e)=>a+e.secs,0)/recentE.length:null;
-  const avgOlder=olderE.length?olderE.reduce((a,e)=>a+e.secs,0)/olderE.length:null;
-  const avgDelta=(avgRecent!=null&&avgOlder!=null)?Math.round(avgRecent-avgOlder):null;
-  const onChainCount=leaderboard.filter(e=>e.onChain).length;
-  const onChainThisWeek=leaderboard.filter(e=>e.onChain&&e.ts>=since).length;
-
-  const stats=[
-    {icon:"👥",bg:"#DCFCE7",label:"Players",value:String(totalPlayers),
-      delta:totalPlayers?`+${newPlayersThisWeek} this week`:"No players yet"},
-    {icon:"🧩",bg:"#FEF3C7",label:"Puzzles Solved",value:String(totalSolved),
-      delta:totalSolved?`+${solvedThisWeek} this week`:"None yet"},
-    {icon:"🕐",bg:"#EDE9FE",label:"Avg. Solve Time",value:totalSolved?fmt(avgSecs):"—",
-      delta:avgDelta==null?"Not enough data yet":`${fmtDelta(avgDelta)} this week`,
-      deltaColor:avgDelta==null?MID:avgDelta>0?"#EF4444":"#22C55E"},
-    {icon:"🏅",bg:"#FFE4D6",label:"On-Chain Records",value:String(onChainCount),
-      delta:onChainCount?`+${onChainThisWeek} this week`:"None yet"},
-  ];
-
-  // ---- champions (best time per player, all-time) ----
-  const champMap=new Map();
-  for(const e of leaderboard){
-    const key=playerKey(e); const {name,pfp}=identityFor(e,usersByWallet);
-    if(!champMap.has(key)) champMap.set(key,{key,name,pfp,address:e.address,best:e.secs,solved:1});
-    else{ const c=champMap.get(key); c.solved+=1; if(e.secs<c.best)c.best=e.secs; }
-  }
-  const champions=[...champMap.values()].sort((a,b)=>a.best-b.best).slice(0,3);
-  const podium=champions.length===3?[champions[1],champions[0],champions[2]]
-    :champions.length===2?[null,champions[0],champions[1]]
-    :champions.length===1?[null,champions[0],null]:[];
-  const rankOf=c=>c?champions.indexOf(c)+1:0;
-
-  // ---- recent completions, with each one's real rank on its own puzzle ----
-  const recent=[...leaderboard].sort((a,b)=>b.ts-a.ts).slice(0,6);
-  const medalFor=entry=>{
-    const ranked=leaderboard.filter(e=>e.puzzleId===entry.puzzleId).sort((a,b)=>a.secs-b.secs);
-    const idx=ranked.indexOf(entry);
-    return idx===0?"🏆":idx===1?"🥈":idx===2?"🥉":"🎯";
-  };
-
-  // ---- best time per puzzle ----
-  const bestByPuzzle=new Map();
-  for(const e of leaderboard){const cur=bestByPuzzle.get(e.puzzleId);if(!cur||e.secs<cur.secs)bestByPuzzle.set(e.puzzleId,e);}
-  const topPuzzles=[...bestByPuzzle.entries()].map(([puzzleId,entry])=>({
-    puzzleId,title:entry.puzzleTitle,pieces:entry.pieces,secs:entry.secs,
-    by:identityFor(entry,usersByWallet).name,
-    thumb:allPuzzles.find(p=>p.id===puzzleId)?.url,
-  })).sort((a,b)=>a.secs-b.secs).slice(0,5);
-
-  const sectionHead=(icon,label)=>(
-    <div style={{display:"flex",alignItems:"center",gap:7,fontWeight:800,fontSize:16,color:DARK,marginBottom:12}}>
-      <span>{icon}</span>{label}
-    </div>
-  );
-  const card={background:WHITE,border:BORDER,borderRadius:14,padding:18};
-
+  // Temporarily disabled while this page is being redesigned — the original
+  // implementation (stats, champions, recent activity, top puzzles) is left
+  // in place above (identityFor/tierFor/fmtDelta) since other features still
+  // use those helpers; only this page's own render is swapped out for now.
   return(
-    <div style={{maxWidth:1200,margin:"0 auto",padding:"28px 16px 40px"}}>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
-        <span style={{fontSize:30}}>🏆</span>
-        <h2 style={{fontWeight:800,fontSize:26,color:DARK,margin:0}}>Hall of Fame</h2>
-      </div>
-      <p style={{color:MID,fontSize:13,margin:"0 0 22px"}}>Celebrating the fastest minds in Puzzle Chain</p>
-
-      {/* Stats */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:30}}>
-        {stats.map(s=>(
-          <div key={s.label} style={{...card,textAlign:"center",padding:"18px 12px"}}>
-            <div style={{width:40,height:40,borderRadius:10,background:s.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,margin:"0 auto 10px"}}>{s.icon}</div>
-            <div style={{color:MID,fontSize:12,fontWeight:600,marginBottom:4}}>{s.label}</div>
-            <div style={{fontWeight:800,fontSize:22,color:DARK,marginBottom:4}}>{s.value}</div>
-            <div style={{fontSize:11,fontWeight:600,color:s.deltaColor||"#22C55E"}}>{s.delta}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Top Champions */}
-      {sectionHead("👑","Top Champions (All Time)")}
-      {champions.length===0?(
-        <div style={{...card,textAlign:"center",padding:40,color:MID,fontWeight:600,marginBottom:30}}>No champions yet — solve a puzzle to claim the throne! 🏆</div>
-      ):(
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginBottom:30,alignItems:"end"}}>
-          {podium.map((c,slot)=>{
-            if(!c) return <div key={slot}/>;
-            const rank=rankOf(c);
-            const isFirst=rank===1;
-            const bg=isFirst?"#FDF1D6":rank===2?"#F3F4F6":"#FBE9E2";
-            const badgeBg=isFirst?GOLD:rank===2?"#9CA3AF":"#C2703D";
-            return(
-              <div key={c.key} style={{background:bg,border:BORDER,borderRadius:16,padding:isFirst?"30px 14px 22px":"22px 12px 18px",textAlign:"center",position:"relative",transform:isFirst?"translateY(-10px)":"none"}}>
-                <div style={{position:"absolute",top:-12,left:"50%",transform:"translateX(-50%)",width:24,height:24,borderRadius:"50%",background:badgeBg,color:WHITE,fontWeight:800,fontSize:12,display:"flex",alignItems:"center",justifyContent:"center",border:"2px solid white"}}>{rank}</div>
-                <div style={{margin:"6px auto 10px",width:isFirst?72:56,height:isFirst?72:56}}>
-                  <Avatar user={{pfp:c.pfp}} size={isFirst?72:56}/>
-                </div>
-                <div style={{fontWeight:800,fontSize:isFirst?16:14,color:DARK,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
-                <span style={{display:"inline-block",background:"#EDE9FE",color:"#6D28D9",fontWeight:700,fontSize:10,borderRadius:20,padding:"2px 10px",margin:"5px 0 12px"}}>{tierFor(c.solved)}</span>
-                <div style={{color:MID,fontSize:10,fontWeight:600,marginBottom:1}}>Best Time</div>
-                <div style={{fontWeight:800,fontSize:isFirst?20:16,color:isFirst?GOLD:DARK,fontFamily:"monospace",marginBottom:8}}>{fmt(c.best)}</div>
-                <div style={{color:MID,fontSize:10,fontWeight:600,marginBottom:1}}>Puzzles Solved</div>
-                <div style={{fontWeight:800,fontSize:15,color:DARK}}>{c.solved}</div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Recent + Top puzzles — stacked on mobile, side-by-side once there's room */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(380px,1fr))",gap:20,marginBottom:28}}>
-        <div style={card}>
-          {sectionHead("⚡","Recent Hall of Fame")}
-          {recent.length===0?(
-            <div style={{textAlign:"center",padding:24,color:MID,fontWeight:600}}>No completions yet.</div>
-          ):recent.map((e,i)=>{
-            const {name,pfp}=identityFor(e,usersByWallet);
-            return(
-              <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderTop:i>0?BORDER:"none"}}>
-                <Avatar user={{pfp}} size={34}/>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontWeight:700,fontSize:13,color:DARK,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</div>
-                  <div style={{color:MID,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.puzzleTitle} · {e.pieces} pieces</div>
-                </div>
-                <div style={{fontWeight:800,fontSize:14,fontFamily:"monospace",color:DARK,flexShrink:0}}>{fmt(e.secs)}</div>
-                <div style={{fontSize:16,flexShrink:0}}>{medalFor(e)}</div>
-              </div>
-            );
-          })}
-        </div>
-
-        <div style={card}>
-          {sectionHead("🔥","Top Puzzles by Records")}
-          {topPuzzles.length===0?(
-            <div style={{textAlign:"center",padding:24,color:MID,fontWeight:600}}>No records yet.</div>
-          ):topPuzzles.map((p,i)=>(
-            <div key={p.puzzleId} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderTop:i>0?BORDER:"none"}}>
-              <div style={{width:46,height:36,borderRadius:7,overflow:"hidden",background:"#eee",border:BORDER,flexShrink:0}}>
-                {p.thumb&&<img src={p.thumb} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>}
-              </div>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:700,fontSize:13,color:DARK,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.title}</div>
-                <div style={{color:MID,fontSize:11}}>{p.pieces} pieces</div>
-              </div>
-              <div style={{textAlign:"right",flexShrink:0}}>
-                <div style={{fontWeight:800,fontSize:14,fontFamily:"monospace",color:GOLD}}>{fmt(p.secs)}</div>
-                <div style={{color:MID,fontSize:10}}>by {p.by}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* CTA */}
-      <div style={{background:"#FDF1D6",border:BORDER,borderRadius:16,padding:"20px 22px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
-        <span style={{fontSize:34}}>🏆</span>
-        <div style={{flex:1,minWidth:200}}>
-          <div style={{fontWeight:800,fontSize:15,color:DARK,marginBottom:2}}>Your Next Record Awaits!</div>
-          <div style={{color:MID,fontSize:12,lineHeight:1.5}}>Solve puzzles, record times on-chain, and earn your place in the Hall of Fame.</div>
-        </div>
-        <button onClick={()=>setPage("gallery")} style={{background:GOLD,color:DARK,border:"none",borderRadius:11,padding:"12px 22px",fontWeight:700,fontSize:14,cursor:"pointer",flexShrink:0}}>Explore Puzzles</button>
-      </div>
+    <div style={{maxWidth:600,margin:"0 auto",padding:"80px 24px",textAlign:"center"}}>
+      <div style={{fontSize:48,marginBottom:14}}>🚧</div>
+      <h2 style={{fontWeight:800,fontSize:22,color:DARK,margin:"0 0 8px"}}>Hall of Fame</h2>
+      <p style={{color:MID,fontSize:14,lineHeight:1.6,margin:"0 0 22px"}}>This page is currently under maintenance. Check back soon!</p>
+      <button onClick={()=>setPage("gallery")} style={{background:GOLD,color:DARK,border:"none",borderRadius:11,padding:"12px 24px",fontWeight:700,fontSize:14,cursor:"pointer"}}>Explore Puzzles</button>
     </div>
   );
 }
@@ -1254,9 +1139,27 @@ function HallOfFamePage({setPage}){
 // HISTORY
 // ─────────────────────────────────────
 function HistoryPage({user,setAuthOpen}){
-  const records=user?S.get("leaderboard",[]).filter(r=>r.address?r.address===user.address:r.username===user.username):[];
-  const best=records.length?Math.min(...records.map(r=>r.secs)):null;
-  const avg=records.length?Math.round(records.reduce((a,r)=>a+r.secs,0)/records.length):null;
+  const [records,setRecords]=useState([]);
+  const [loading,setLoading]=useState(false);
+
+  useEffect(()=>{
+    if(!user?.address) return;
+    setLoading(true);
+    DB.getUserHistory(user.address)
+      .then(rows=>{
+        setRecords(rows.map(r=>({
+          puzzleId:r.puzzle_id, puzzleTitle:r.puzzle_title, pieces:r.pieces, secs:r.secs,
+          onChain:r.on_chain, txHash:r.tx_hash, tokenId:r.token_id, ts:r.ts,
+        })));
+      })
+      .catch(()=>{})
+      .finally(()=>setLoading(false));
+  },[user?.address]);
+
+  const totalGames=records.length;
+  const minted=records.filter(r=>r.onChain).length;
+  const uniquePuzzles=new Set(records.map(r=>r.puzzleId)).size;
+
   return(
     <div style={{maxWidth:700,margin:"0 auto",padding:"28px 16px 40px"}}>
       <h2 style={{fontWeight:800,fontSize:24,color:DARK,margin:"0 0 6px"}}>History</h2>
@@ -1268,9 +1171,10 @@ function HistoryPage({user,setAuthOpen}){
           <button onClick={()=>setAuthOpen(true)} style={{background:GOLD,color:DARK,border:"none",borderRadius:11,padding:"11px 26px",fontWeight:700,fontSize:14,cursor:"pointer"}}>🔗 Connect Wallet</button>
         </div>
       )}
-      {user&&records.length>0&&(
+      {user&&loading&&<div style={{textAlign:"center",padding:60,color:MID}}>Loading…</div>}
+      {user&&!loading&&records.length>0&&(
         <div style={{background:WHITE,border:BORDER,borderRadius:13,padding:"14px 20px",marginBottom:20,display:"flex"}}>
-          {[["Total Games",""+records.length],["Best Time",best?fmt(best):"—"],["Avg Time",avg?fmt(avg):"—"]].map(([l,v],i)=>(
+          {[["Total Games",""+totalGames],["Minted",""+minted],["Unique Puzzles",""+uniquePuzzles]].map(([l,v],i)=>(
             <div key={l} style={{flex:1,textAlign:"center",borderRight:i<2?BORDER:"none"}}>
               <div style={{fontWeight:800,fontSize:20,color:DARK}}>{v}</div>
               <div style={{color:MID,fontSize:11,fontWeight:600,marginTop:2}}>{l}</div>
@@ -1278,9 +1182,9 @@ function HistoryPage({user,setAuthOpen}){
           ))}
         </div>
       )}
-      {user&&records.length===0&&<div style={{textAlign:"center",padding:60,color:MID,fontWeight:600}}>No puzzles solved yet 🧩</div>}
+      {user&&!loading&&records.length===0&&<div style={{textAlign:"center",padding:60,color:MID,fontWeight:600}}>No puzzles solved yet 🧩</div>}
       {records.map((r,i)=>{
-        const img=PUZZLES.find(p=>p.id===r.puzzleId);
+        const img=[...PUZZLES,...(S.get("userPuzzles",[])||[])].find(p=>p.id===r.puzzleId);
         return(
           <div key={i}>
             <div style={{display:"flex",alignItems:"center",gap:14,padding:"12px 0"}}>
@@ -1455,14 +1359,22 @@ function CreatePage({user,setAuthOpen}){
   );
   const handleFile=async e=>{const f=e.target.files[0];if(!f)return;const d=await readFile(f);setImgSrc(d);setImgUrl("");};
   const finalImg=imgSrc||imgUrl;
+  const [saving,setSaving]=useState(false);
   const authorName=user.username||user.displayName||shortAddr(user.address);
-  const create=()=>{
+  const create=async()=>{
     setErr(""); if(!finalImg||!title.trim()){setErr("Image and title required");return;}
-    const pz=S.get("userPuzzles",[]);
-    pz.push({id:Date.now(),url:finalImg,title:title.trim(),desc:desc.trim(),tags:tags.split(",").map(t=>t.trim()).filter(Boolean),author:user.address,authorName,createdAt:Date.now()});
-    S.set("userPuzzles",pz);
-    addLog({type:"puzzle_created",user:authorName,puzzle:title});
-    setDone(true);setImgSrc("");setImgUrl("");setTitle("");setTags("");setDesc("");
+    setSaving(true);
+    const puzzle={
+      id:Date.now(), url:finalImg, title:title.trim(), desc:desc.trim(),
+      tags:tags.split(",").map(t=>t.trim()).filter(Boolean),
+      author:user.address, authorName, createdAt:Date.now(),
+    };
+    try{
+      await DB.addCommunityPuzzle(puzzle);
+      addLog({type:"puzzle_created",user:authorName,puzzle:title});
+      setDone(true);setImgSrc("");setImgUrl("");setTitle("");setTags("");setDesc("");
+    }catch(e){setErr("Failed to publish puzzle. Please try again.");}
+    setSaving(false);
   };
   return(
     <div style={{maxWidth:500,margin:"0 auto",padding:"28px 16px 40px"}}>
@@ -1493,7 +1405,7 @@ function CreatePage({user,setAuthOpen}){
         ))}
         {err&&<p style={{color:"#EF4444",fontWeight:600,fontSize:12,margin:"0 0 10px"}}>⚠️ {err}</p>}
         {done&&<div style={{background:"#DCFCE7",borderRadius:9,padding:11,marginBottom:11}}><p style={{color:"#166534",fontWeight:700,margin:0,fontSize:13}}>✅ Puzzle added to gallery!</p></div>}
-        <button onClick={create} style={{width:"100%",background:GOLD,color:DARK,border:"none",borderRadius:11,padding:"13px",fontWeight:700,fontSize:14,cursor:"pointer"}}>Create & Share 🎉</button>
+        <button onClick={create} disabled={saving} style={{width:"100%",background:GOLD,color:DARK,border:"none",borderRadius:11,padding:"13px",fontWeight:700,fontSize:14,cursor:saving?"default":"pointer",opacity:saving?.7:1}}>{saving?"Publishing…":"Create & Share 🎉"}</button>
       </div>
     </div>
   );
@@ -1540,10 +1452,23 @@ function AdminPage(){
   const [tab,setTab]=useState("logs");
   const logs=S.get("logs",[]);
   const [banned,setBanned]=useState(S.get("bannedUsers",[]));
-  const [up,setUp]=useState(S.get("userPuzzles",[]));
+  const [up,setUp]=useState([]);
+
+  useEffect(()=>{
+    DB.getCommunityPuzzles().then(rows=>{
+      setUp(rows.map(r=>({
+        id:r.id, url:r.url, title:r.title, author:r.author, authorName:r.author_name||r.author,
+      })));
+    }).catch(()=>{});
+  },[]);
+
   const ban=u=>{const b=[...banned,u];setBanned(b);S.set("bannedUsers",b);addLog({type:"user_banned",admin:"admin",target:u});};
-  const del=id=>{const x=up.filter(p=>p.id!==id);setUp(x);S.set("userPuzzles",x);addLog({type:"puzzle_deleted",admin:"admin",puzzleId:id});};
   const unban=u=>{const b=banned.filter(x=>x!==u);setBanned(b);S.set("bannedUsers",b);};
+  const hide=id=>{
+    DB.hideCommunityPuzzle(id).catch(()=>{});
+    setUp(prev=>prev.filter(p=>p.id!==id));
+    addLog({type:"puzzle_hidden",admin:"admin",puzzleId:id});
+  };
   return(
     <div style={{maxWidth:900,margin:"0 auto",padding:"28px 16px"}}>
       <h2 style={{fontWeight:800,fontSize:24,color:"#EF4444",margin:"0 0 18px"}}>👑 Admin Panel</h2>
@@ -1569,7 +1494,7 @@ function AdminPage(){
             <div style={{color:MID,fontSize:11}}>by {p.authorName||shortAddr(p.author)||p.author}</div>
           </div>
           <div style={{display:"flex",gap:6}}>
-            <button onClick={()=>del(p.id)} style={{background:"#FEE2E2",color:"#EF4444",border:"none",borderRadius:7,padding:"5px 12px",fontWeight:700,fontSize:12,cursor:"pointer"}}>🗑</button>
+            <button onClick={()=>hide(p.id)} style={{background:"#FEE2E2",color:"#EF4444",border:"none",borderRadius:7,padding:"5px 12px",fontWeight:700,fontSize:12,cursor:"pointer"}}>🗑</button>
             <button onClick={()=>ban(p.author)} style={{background:BG,color:"#EF4444",border:"1px solid #FECACA",borderRadius:7,padding:"5px 12px",fontWeight:700,fontSize:12,cursor:"pointer"}}>🚫</button>
           </div>
         </div>
@@ -1588,38 +1513,26 @@ function AdminPage(){
 // AUTH MODAL
 // ─────────────────────────────────────
 function AuthModal({onClose,onLogin}){
-  const [status,setStatus]=useState("idle"); // idle | connecting | error
-  const [err,setErr]=useState("");
-  const hasWallet=typeof window!=="undefined"&&!!window.ethereum;
+  const [connecting,setConnecting]=useState(false);
 
   const go=async()=>{
-    setErr(""); setStatus("connecting");
+    setConnecting(true);
     try{
       const u=await signInWithWallet();
       onLogin(u);
     }catch(e){
-      setErr(e.message||"Something went wrong."); setStatus("error");
+      setConnecting(false);
     }
   };
 
   return(
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-      <div style={{background:WHITE,borderRadius:18,width:"100%",maxWidth:380,padding:"28px 24px",boxShadow:"0 20px 60px rgba(0,0,0,.25)",textAlign:"center"}}>
-        <div style={{fontSize:40,marginBottom:10}}>🔗</div>
-        <h2 style={{fontWeight:800,fontSize:20,color:DARK,margin:"0 0 8px"}}>Connect your wallet</h2>
-        <p style={{color:MID,fontSize:13,lineHeight:1.6,margin:"0 0 20px"}}>
-          PuzzleChain uses wallet-only sign-in — no email or password. Connect your wallet and sign a free message to verify you own it.
-        </p>
-        {!hasWallet&&(
-          <p style={{color:"#EF4444",fontWeight:600,fontSize:12,margin:"0 0 14px"}}>⚠️ No EVM wallet found. Install MetaMask to continue.</p>
-        )}
-        {err&&<p style={{color:"#EF4444",fontWeight:600,fontSize:12,margin:"0 0 14px"}}>⚠️ {err}</p>}
-        <button onClick={go} disabled={status==="connecting"||!hasWallet}
-          style={{width:"100%",background:GOLD,color:DARK,border:"none",borderRadius:11,padding:"13px",fontWeight:700,fontSize:14,cursor:hasWallet?"pointer":"default",marginBottom:9,opacity:status==="connecting"?.7:1}}>
-          {status==="connecting"?"Waiting for wallet…":"🔗 Connect Wallet"}
+      <div style={{background:WHITE,borderRadius:18,width:"100%",maxWidth:340,padding:"24px",boxShadow:"0 20px 60px rgba(0,0,0,.25)"}}>
+        <button onClick={go} disabled={connecting}
+          style={{width:"100%",background:GOLD,color:DARK,border:"none",borderRadius:11,padding:"13px",fontWeight:700,fontSize:14,cursor:"pointer",marginBottom:9,opacity:connecting?.7:1}}>
+          {connecting?"Connecting…":"🔗 Connect Wallet"}
         </button>
         <button onClick={onClose} style={{width:"100%",background:BG,color:MID,border:BORDER,borderRadius:11,padding:"11px",fontWeight:600,fontSize:13,cursor:"pointer"}}>Cancel</button>
-        <p style={{color:MID,fontSize:11,margin:"14px 0 0"}}>Signing the message is free — it never sends a transaction or costs gas.</p>
       </div>
     </div>
   );
@@ -1643,6 +1556,11 @@ export default function App(){
   const [selPieces,setSelPieces]=useState(null);
   const [gameKey,setGameKey]=useState(0);
   const [sort,setSort]=useState("Newest First");
+
+  // One-time migration: push any existing localStorage data (leaderboard, solve history,
+  // community puzzles) into Supabase so it's globally visible. Runs once per browser,
+  // then marks itself done. If it fails for any reason the app continues normally.
+  useEffect(()=>{ migrateLocalStorageToDb(); },[]);
 
   // Listen for mobile sort change
   useEffect(()=>{
