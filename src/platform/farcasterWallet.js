@@ -7,7 +7,7 @@
  * and the rest of the app uses it through provider.js.
  */
 
-import { sdk, isInMiniApp } from "@farcaster/miniapp-sdk";
+import { sdk } from "@farcaster/miniapp-sdk";
 
 // ─── Module-level singletons ─────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ export async function initFarcasterWallet() {
   _checked = true;
 
   try {
-    _isMiniApp = await isInMiniApp();
+    _isMiniApp = await sdk.isInMiniApp();
   } catch {
     _isMiniApp = false;
   }
