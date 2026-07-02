@@ -21,7 +21,7 @@
  */
 
 import { _setIsFarcaster, isFarcaster, isWebsite } from "./detect.js";
-import { initFarcasterWallet }                     from "./farcasterWallet.js";
+import { initFarcasterWallet, getFarcasterIsMiniApp } from "./farcasterWallet.js";
 import { getProvider }                             from "./provider.js";
 import { getNormalizedProfile }                    from "./profile.js";
 import { connectPlatformWallet, signInWithPlatformWallet } from "./auth.js";
@@ -40,8 +40,12 @@ async function init() {
   if (_initialized) return;
   _initialized = true;
 
-  const ctx = await initFarcasterWallet();
-  _setIsFarcaster(!!ctx);       // ctx is non-null only inside Farcaster
+  await initFarcasterWallet();
+  // Detection MUST use the sdk.isInMiniApp() result (surfaced here via
+  // getFarcasterIsMiniApp()), never sdk.context — context can be empty/
+  // unpopulated even while genuinely running inside a Farcaster client,
+  // which would incorrectly fall back to the website/MetaMask flow.
+  _setIsFarcaster(getFarcasterIsMiniApp());
 }
 
 // ─── Wallet ──────────────────────────────────────────────────────────────────

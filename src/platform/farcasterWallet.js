@@ -34,16 +34,20 @@ export const getFarcasterRawProvider = () => _provider;
  * in ~100 ms and this function exits early without touching anything.
  *
  * In Farcaster:
- *  1. Confirms the environment via sdk.isInMiniApp().
- *  2. Retrieves the EIP-1193 provider from sdk.wallet.getEthereumProvider().
+ *  1. Confirms the environment via sdk.isInMiniApp() — the official,
+ *     SDK-supported detection method. This (not sdk.context) is the
+ *     source of truth for "are we inside a Farcaster client".
+ *  2. Calls sdk.actions.ready() to complete the handshake and dismiss the
+ *     splash screen — the host does not reliably expose the embedded
+ *     wallet until this has happened.
+ *  3. Retrieves the EIP-1193 provider from sdk.wallet.getEthereumProvider().
  *     Provider is stored internally — NOT written to window.ethereum.
- *  3. Calls sdk.actions.ready() to dismiss the splash screen.
- *  4. Caches sdk.context for profile use.
+ *  4. Caches sdk.context for profile use only (never for platform detection).
  *
- * @returns {Promise<object|null>} MiniAppContext or null.
+ * @returns {Promise<boolean>} true if running inside a Farcaster client.
  */
 export async function initFarcasterWallet() {
-  if (_checked) return _context;
+  if (_checked) return _isMiniApp;
   _checked = true;
 
   try {
@@ -52,23 +56,28 @@ export async function initFarcasterWallet() {
     _isMiniApp = false;
   }
 
-  if (!_isMiniApp) return null;
+  if (!_isMiniApp) return false;
 
   try {
-    // Grab the EIP-1193 provider — stored privately, never put on window.ethereum.
-    _provider = sdk.wallet.getEthereumProvider() ?? null;
-
-    // Dismiss the Farcaster splash screen.
+    // Complete SDK initialization / dismiss the splash screen BEFORE asking
+    // for the wallet provider — the provider isn't reliably available until
+    // the ready() handshake has completed.
     await sdk.actions.ready();
     _ready = true;
 
-    // Cache context (user, client, location).
+    // Grab the EIP-1193 provider — stored privately, never put on window.ethereum.
+    // Await defensively: some hosts resolve this asynchronously.
+    _provider = (await sdk.wallet.getEthereumProvider()) ?? null;
+
+    // Cache context (user, client, location) for profile display only.
     _context = sdk.context ?? null;
 
-    return _context;
+    return true;
   } catch (err) {
     console.warn("[Farcaster] SDK init error:", err);
-    return null;
+    // We are still inside a Farcaster client even if provider/context setup
+    // failed partway — do not silently demote to "website" mode.
+    return _isMiniApp;
   }
 }
 
