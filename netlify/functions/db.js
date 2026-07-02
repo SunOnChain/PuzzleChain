@@ -1,26 +1,39 @@
 // Netlify Function — proxies DB operations to Supabase.
 // The SUPABASE_SERVICE_KEY never leaves this function.
 exports.handler = async function (event) {
+  console.log("[DB-FN] received method=", event.httpMethod);
+
   if (event.httpMethod !== "POST") {
+    console.log("[DB-FN] wrong method:", event.httpMethod);
     return { statusCode: 405, body: JSON.stringify({ error: "Method not allowed" }) };
   }
 
-  const URL  = process.env.SUPABASE_URL;
-  const KEY  = process.env.SUPABASE_SERVICE_KEY;
+  const URL = process.env.SUPABASE_URL;
+  const KEY = process.env.SUPABASE_SERVICE_KEY;
+
+  console.log("[DB-FN] SUPABASE_URL set=", !!URL, "| SUPABASE_SERVICE_KEY set=", !!KEY);
 
   if (!URL || !KEY) {
+    console.error("[DB-FN] NOT CONFIGURED — env vars missing.");
     return { statusCode: 503, body: JSON.stringify({ error: "Database not configured: SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment variables." }) };
   }
 
   let body;
-  try { body = JSON.parse(event.body || "{}"); }
-  catch { return { statusCode: 400, body: JSON.stringify({ error: "Invalid JSON" }) }; }
+  try {
+    body = JSON.parse(event.body || "{}");
+    console.log("[DB-FN] action=", body.action, "| full body=", event.body);
+  } catch (e) {
+    console.error("[DB-FN] JSON parse error:", e.message, "| raw body=", event.body);
+    return { statusCode: 400, body: JSON.stringify({ error: "Invalid JSON: " + e.message }) };
+  }
 
   try {
     const result = await dispatch(URL, KEY, body);
+    console.log("[DB-FN] success action=", body.action, "| result=", JSON.stringify(result));
     return { statusCode: 200, body: JSON.stringify(result) };
   } catch (err) {
-    return { statusCode: 500, body: JSON.stringify({ error: err.message || "DB error" }) };
+    console.error("[DB-FN] ERROR action=", body.action, "| message=", err.message, "| stack=", err.stack);
+    return { statusCode: 500, body: JSON.stringify({ error: err.message, stack: err.stack }) };
   }
 };
 

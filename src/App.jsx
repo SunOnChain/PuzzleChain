@@ -766,13 +766,79 @@ function BottomTabs({page,setPage,user,setAuthOpen}){
 }
 
 // ─────────────────────────────────────
-// GALLERY
+// GALLERY — optimized community puzzle loading
 // ─────────────────────────────────────
+
+// In-memory thumbnail cache: puzzleId → 400px-wide jpeg data URL.
+// Avoids regenerating the canvas thumbnail on every re-render.
+const thumbCache = new Map();
+
+// Generates a downscaled thumbnail from a full-res src using Canvas and caches it.
+// Returns the thumbnail data URL via the callback once ready.
+function generateThumbnail(src, id, onDone) {
+  if (thumbCache.has(id)) { onDone(thumbCache.get(id)); return; }
+  const img = new Image();
+  img.onload = () => {
+    const MAX = 400;
+    const scale = Math.min(1, MAX / img.naturalWidth, MAX / img.naturalHeight);
+    const w = Math.round(img.naturalWidth * scale);
+    const h = Math.round(img.naturalHeight * scale);
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      const thumb = canvas.toDataURL("image/jpeg", 0.80);
+      thumbCache.set(id, thumb);
+      onDone(thumb);
+    } catch { onDone(src); } // cross-origin canvas taint fallback
+  };
+  img.onerror = () => onDone(src);
+  img.crossOrigin = "anonymous";
+  img.src = src;
+}
+
+// Renders the puzzle thumbnail for a community card.
+// Shows a skeleton while generating the downscaled version; swaps in the
+// thumbnail once ready. Built-in puzzles pass `isBuiltin=true` to skip
+// the canvas step (they're already small CDN images).
+function PuzzleCardImage({ src, id, isBuiltin }) {
+  const [displaySrc, setDisplaySrc] = useState(null);
+
+  useEffect(() => {
+    if (!src) return;
+    if (isBuiltin) { setDisplaySrc(src); return; }
+    // Check memory cache first (instant if already generated this session).
+    if (thumbCache.has(id)) { setDisplaySrc(thumbCache.get(id)); return; }
+    generateThumbnail(src, id, setDisplaySrc);
+  }, [src, id, isBuiltin]);
+
+  if (!displaySrc) {
+    // Skeleton: same size as the real image, prevents layout shift.
+    return (
+      <div style={{
+        position: "absolute", inset: 0,
+        background: "linear-gradient(90deg,#E5E0D8 25%,#EDE8E0 50%,#E5E0D8 75%)",
+        backgroundSize: "200% 100%",
+        animation: "pzSkeleton 1.4s ease infinite",
+      }} />
+    );
+  }
+  return (
+    <img
+      src={displaySrc}
+      alt=""
+      loading="lazy"
+      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+    />
+  );
+}
+
 function GalleryPage({setPage,setSelPuzzle,sort}){
   const [search,setSearch]=useState("");
   const [pg,setPg]=useState(1);
   const [dbPuzzles,setDbPuzzles]=useState([]);
   const [solveCounts,setSolveCounts]=useState({});
+  const [dbLoading,setDbLoading]=useState(true);
   const PER=12;
 
   useEffect(()=>{
@@ -781,15 +847,26 @@ function GalleryPage({setPage,setSelPuzzle,sort}){
     return()=>window.removeEventListener("pzsearch",h);
   },[]);
 
-  // Load community puzzles and solve counts from the shared DB on mount.
+  // Fetch community puzzles and solve counts in parallel.
+  // Built-in PUZZLES are available instantly (no fetch needed) so the
+  // gallery renders immediately; community cards arrive and fill in.
   useEffect(()=>{
-    DB.getCommunityPuzzles().then(rows=>{
-      setDbPuzzles(rows.map(r=>({
+    Promise.all([
+      DB.getCommunityPuzzles(),
+      DB.getPuzzleSolveCounts(),
+    ]).then(([rows,counts])=>{
+      const mapped=rows.map(r=>({
         id:r.id, url:r.url, title:r.title, desc:r.description||"",
         tags:r.tags||[], author:r.author, authorName:r.author_name, createdAt:r.created_at,
-      })));
-    }).catch(()=>{});
-    DB.getPuzzleSolveCounts().then(setSolveCounts).catch(()=>{});
+        isCommunity:true,
+      }));
+      setDbPuzzles(mapped);
+      setSolveCounts(counts||{});
+      setDbLoading(false);
+      // Preload the first 4 community images immediately after the DB responds
+      // so by the time the user scrolls to them the thumbnails are already generating.
+      mapped.slice(0,4).forEach(p=>{ if(p.url&&!thumbCache.has(p.id)) generateThumbnail(p.url,p.id,()=>{}); });
+    }).catch(()=>setDbLoading(false));
   },[]);
 
   const banned=S.get("bannedUsers",[]);
@@ -819,8 +896,15 @@ function GalleryPage({setPage,setSelPuzzle,sort}){
   const [mobSortOpen,setMobSortOpen]=useState(false);
   const sortOpts=["Newest First","Oldest First","Most Solved","A–Z"];
 
+  // How many skeleton cards to show: max 4, but only while DB is still loading
+  // and only on the first page so we don't show skeletons on subsequent pages.
+  const skeletonCount = dbLoading && pg === 1 ? Math.min(4, PER - shown.length) : 0;
+
   return(
     <div style={{maxWidth:1400,margin:"0 auto",padding:"20px 16px 24px"}}>
+      {/* Skeleton keyframe — injected once inline */}
+      <style>{`@keyframes pzSkeleton{0%{background-position:200% 0}100%{background-position:-200% 0}}`}</style>
+
       {/* Mobile-only filter bar */}
       <div className="mobile-only" style={{display:"none",alignItems:"center",gap:8,marginBottom:16}}>
         <div style={{position:"relative",flex:1}}>
@@ -847,7 +931,7 @@ function GalleryPage({setPage,setSelPuzzle,sort}){
             onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-3px)";e.currentTarget.style.boxShadow="0 8px 24px rgba(0,0,0,.12)";}}
             onMouseLeave={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow="0 1px 4px rgba(0,0,0,.06)";}}>
             <div style={{position:"relative",paddingTop:"70%",overflow:"hidden"}}>
-              <img src={p.url} alt={p.title} loading="lazy" style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover"}}/>
+              <PuzzleCardImage src={p.url} id={p.id} isBuiltin={!p.isCommunity}/>
               <button onClick={e=>toggleLike(e,p.id)} style={{position:"absolute",top:8,right:8,width:28,height:28,borderRadius:"50%",background:"rgba(255,255,255,.88)",border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>
                 {liked.includes(p.id)?"❤️":"🤍"}
               </button>
@@ -858,6 +942,25 @@ function GalleryPage({setPage,setSelPuzzle,sort}){
             <div style={{padding:"10px 12px"}}>
               <div style={{fontWeight:700,fontSize:13,color:DARK}}>{p.title}</div>
               <div style={{fontSize:11,color:MID,marginTop:2}}>{solvedCount(p.id)} solves</div>
+            </div>
+          </div>
+        ))}
+
+        {/* Skeleton cards — stable placeholders that hold grid space while
+            community puzzles are still loading. Same dimensions as real cards. */}
+        {Array.from({length:skeletonCount},(_,i)=>(
+          <div key={`skel-${i}`} style={{background:WHITE,borderRadius:14,overflow:"hidden",border:BORDER,boxShadow:"0 1px 4px rgba(0,0,0,.06)"}}>
+            <div style={{position:"relative",paddingTop:"70%",overflow:"hidden"}}>
+              <div style={{
+                position:"absolute",inset:0,
+                background:"linear-gradient(90deg,#E5E0D8 25%,#EDE8E0 50%,#E5E0D8 75%)",
+                backgroundSize:"200% 100%",
+                animation:"pzSkeleton 1.4s ease infinite",
+              }}/>
+            </div>
+            <div style={{padding:"10px 12px"}}>
+              <div style={{height:13,borderRadius:6,background:"#E5E0D8",width:"70%",marginBottom:6}}/>
+              <div style={{height:10,borderRadius:6,background:"#EDE8E0",width:"40%"}}/>
             </div>
           </div>
         ))}

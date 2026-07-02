@@ -2,13 +2,31 @@
 // The browser NEVER calls Supabase directly — every request is proxied through
 // our own serverless function (/api/db) so the service key stays server-side.
 async function callDB(payload) {
-  const res = await fetch("/api/db", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Database error");
+  console.log("[DB] ▶ callDB action=", payload.action, "| payload=", JSON.stringify(payload));
+  let res, rawText;
+  try {
+    res = await fetch("/api/db", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    rawText = await res.text();
+    console.log("[DB] ◀ action=", payload.action, "| status=", res.status, "| raw response=", rawText);
+  } catch (networkErr) {
+    console.error("[DB] ✖ NETWORK ERROR action=", payload.action, "|", networkErr);
+    throw networkErr;
+  }
+  let data;
+  try { data = JSON.parse(rawText); }
+  catch (parseErr) {
+    console.error("[DB] ✖ RESPONSE PARSE ERROR action=", payload.action, "| raw=", rawText, "|", parseErr);
+    throw new Error("DB response was not valid JSON: " + rawText);
+  }
+  if (!res.ok) {
+    console.error("[DB] ✖ HTTP ERROR action=", payload.action, "| status=", res.status, "| error=", data.error || rawText);
+    throw new Error(data.error || "Database error (HTTP " + res.status + ")");
+  }
+  console.log("[DB] ✔ action=", payload.action, "| parsed result=", JSON.stringify(data));
   return data;
 }
 
