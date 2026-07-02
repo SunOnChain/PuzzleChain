@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { verifyMessage } from "ethers";
 import { isMintConfigured, mintAchievement } from "./lib/nft.js";
 import { DB, migrateLocalStorageToDb } from "./lib/db.js";
+import { initFarcaster } from "./lib/farcaster.js";
 
 const BG    = "#F5F0E8";
 const GOLD  = "#F5A623";
@@ -1669,7 +1670,14 @@ export default function App(){
   const [gameKey,setGameKey]=useState(0);
   const [sort,setSort]=useState("Newest First");
 
-  // DB connectivity check — logs to console so you can see immediately on load
+  // ── Farcaster Mini App initialization ──────────────────────────────────────
+  // Runs once on mount. In a normal browser this is a no-op (isInMiniApp()
+  // returns false in ~100 ms and we exit early). In Farcaster it bridges the
+  // wallet provider to window.ethereum, calls sdk.actions.ready() to dismiss
+  // the splash screen, and caches the user context for the useFarcaster hook.
+  useEffect(() => { initFarcaster().catch(() => {}); }, []);
+
+  // ── DB connectivity check ───────────────────────────────────────────────────
   // whether the database is reachable. Check browser DevTools → Console after deploy.
   useEffect(()=>{
     fetch("/api/db",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"ping"})})

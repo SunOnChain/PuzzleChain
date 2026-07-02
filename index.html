@@ -6,6 +6,56 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PuzzleChain – Solve. Compete. Prove it on-chain.</title>
     <meta name="description" content="Jigsaw puzzles meet Web3. Race the clock, record your score on Monad blockchain, and claim your spot on the leaderboard." />
+
+    <!-- Open Graph (required for the embed image Farcaster shows in the feed) -->
+    <meta property="og:title"       content="PuzzleChain" />
+    <meta property="og:description" content="Jigsaw puzzles meet Web3. Solve puzzles and mint achievements on Monad." />
+    <meta property="og:image"       content="REPLACE_WITH_HTTPS_URL_TO_OG_IMAGE" />
+    <meta property="og:url"         content="REPLACE_WITH_YOUR_DEPLOYED_URL" />
+    <meta property="og:type"        content="website" />
+
+    <!--
+      Farcaster Mini App embed metadata.
+      Replace every REPLACE_WITH_* value before publishing.
+      ─────────────────────────────────────────────────────
+      imageUrl          – 3:2 ratio preview image shown in the Farcaster feed.
+      button.title      – Label on the launch button (max 32 chars).
+      action.url        – URL Farcaster opens when the button is tapped.
+      splashImageUrl    – Square icon (≥ 200 × 200 px) shown on the splash screen.
+      splashBackground  – Hex colour of the splash screen background.
+
+      fc:miniapp is the current tag; fc:frame is kept for backward compatibility
+      with older Farcaster clients.  Both point at the same JSON object.
+    -->
+    <meta name="fc:miniapp" content='{
+      "version": "1",
+      "imageUrl": "REPLACE_WITH_HTTPS_URL_TO_OG_IMAGE",
+      "button": {
+        "title": "🧩 Play PuzzleChain",
+        "action": {
+          "type": "launch_frame",
+          "name": "PuzzleChain",
+          "url": "REPLACE_WITH_YOUR_DEPLOYED_URL",
+          "splashImageUrl": "REPLACE_WITH_HTTPS_URL_TO_SPLASH_IMAGE",
+          "splashBackgroundColor": "#F8F5F0"
+        }
+      }
+    }' />
+    <!-- Backward-compatible alias -->
+    <meta name="fc:frame" content='{
+      "version": "1",
+      "imageUrl": "REPLACE_WITH_HTTPS_URL_TO_OG_IMAGE",
+      "button": {
+        "title": "🧩 Play PuzzleChain",
+        "action": {
+          "type": "launch_frame",
+          "name": "PuzzleChain",
+          "url": "REPLACE_WITH_YOUR_DEPLOYED_URL",
+          "splashImageUrl": "REPLACE_WITH_HTTPS_URL_TO_SPLASH_IMAGE",
+          "splashBackgroundColor": "#F8F5F0"
+        }
+      }
+    }' />
   </head>
   <body>
     <div id="root"></div>
