@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { verifyMessage } from "ethers";
 import { isMintConfigured, mintAchievement } from "./lib/nft.js";
 import { DB, migrateLocalStorageToDb } from "./lib/db.js";
-import { initFarcaster } from "./lib/farcaster.js";
+import { platform } from "./platform/index.js";
 
 const BG    = "#F5F0E8";
 const GOLD  = "#F5A623";
@@ -94,45 +93,16 @@ function playSnap(){
   }catch{}
 }
 
-async function connectWallet(){
-  if(!window.ethereum) throw new Error("No EVM wallet found. Install MetaMask or Rabby.");
-  const [addr]=await window.ethereum.request({method:"eth_requestAccounts"});
-  try{ await window.ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:MONAD.chainId}]}); }
-  catch(e){ if(e.code===4902) await window.ethereum.request({method:"wallet_addEthereumChain",params:[MONAD]}); else throw e; }
-  return addr;
-}
-
 // ─────────────────────────────────────
 // WALLET AUTHENTICATION (replaces username/password)
-// Connecting a wallet is not enough on its own — the user must also sign a
-// SIWE-style message, proving they control the private key for that address,
-// before we trust the address and create/open their session.
+// Delegates to platform.signIn() which handles both MetaMask (website)
+// and the Farcaster embedded wallet (mini app) transparently.
 // ─────────────────────────────────────
-function buildSiweMessage(address,nonce){
-  return `${window.location.host} wants you to sign in with your Ethereum account:\n${address}\n\nSign in to PuzzleChain to verify you own this wallet. This request will not trigger a blockchain transaction or cost any gas.\n\nURI: ${window.location.origin}\nVersion: 1\nNonce: ${nonce}\nIssued At: ${new Date().toISOString()}`;
-}
-
 async function signInWithWallet(){
-  const address=await connectWallet(); // requests accounts + switches to Monad Mainnet
-  const addrLower=address.toLowerCase();
-  const nonce=Math.random().toString(36).slice(2,10)+Date.now().toString(36);
-  const message=buildSiweMessage(address,nonce);
+  // platform.signIn() connects + SIWE-signs and returns the verified address.
+  const addrLower=await platform.signIn();
+  const address=addrLower; // signIn() already returns lowercase
 
-  let signature;
-  try{
-    signature=await window.ethereum.request({method:"personal_sign",params:[message,address]});
-  }catch(e){
-    if(e?.code===4001) throw new Error("Signature request was rejected.");
-    throw new Error("Failed to sign the verification message.");
-  }
-
-  let recovered=null;
-  try{ recovered=verifyMessage(message,signature); }catch{ recovered=null; }
-  if(!recovered||recovered.toLowerCase()!==addrLower){
-    throw new Error("Wallet signature could not be verified. Please try again.");
-  }
-
-  // Signature verified — this wallet is now provably owned by whoever is connecting.
   const usersByWallet=S.get("usersByWallet",{});
   let record=usersByWallet[addrLower];
   let isNew=false;
@@ -148,8 +118,6 @@ async function signInWithWallet(){
     usersByWallet[addrLower]=record;
     S.set("usersByWallet",usersByWallet);
   }else if(record.isAdmin!==isAdminNow){
-    // Admin status is config-driven (VITE_ADMIN_WALLET), so keep it fresh on every
-    // sign-in rather than freezing whatever it was when the account was first created.
     record.isAdmin=isAdminNow;
     usersByWallet[addrLower]=record;
     S.set("usersByWallet",usersByWallet);
@@ -1654,8 +1622,8 @@ function AuthModal({onClose,onLogin}){
 // ─────────────────────────────────────
 // STYLE HELPERS
 // ─────────────────────────────────────
-const ctrlBtn=(bg=WHITE)=>({background:bg,border:BORDER,borderRadius:8,cursor:"pointer",fontFamily:"inherit",fontWeight:600,fontSize:12,color:DARK,display:"inline-flex",alignItems:"center",gap:5,height:36,padding:"0 10px",flexShrink:0});
-const iconBtn=(size,bg=WHITE)=>({width:size,height:size,background:bg,border:BORDER,borderRadius:8,cursor:"pointer",fontSize:17,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,padding:0});
+const ctrlBtn=(bg=WHITE)=>({background:bg,backgroundColor:bg,border:BORDER,borderRadius:8,cursor:"pointer",fontFamily:"inherit",fontWeight:600,fontSize:12,color:DARK,display:"inline-flex",alignItems:"center",gap:5,height:36,padding:"0 10px",flexShrink:0});
+const iconBtn=(size,bg=WHITE)=>({width:size,height:size,background:bg,backgroundColor:bg,border:BORDER,borderRadius:8,cursor:"pointer",fontSize:17,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,padding:0});
 const dropItem=()=>({background:"none",border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer",fontFamily:"inherit",fontSize:13,textAlign:"left",width:"100%",display:"flex",alignItems:"center",gap:8,color:DARK});
 
 // ─────────────────────────────────────
@@ -1670,12 +1638,11 @@ export default function App(){
   const [gameKey,setGameKey]=useState(0);
   const [sort,setSort]=useState("Newest First");
 
-  // ── Farcaster Mini App initialization ──────────────────────────────────────
-  // Runs once on mount. In a normal browser this is a no-op (isInMiniApp()
-  // returns false in ~100 ms and we exit early). In Farcaster it bridges the
-  // wallet provider to window.ethereum, calls sdk.actions.ready() to dismiss
-  // the splash screen, and caches the user context for the useFarcaster hook.
-  useEffect(() => { initFarcaster().catch(() => {}); }, []);
+  // ── Platform initialization ────────────────────────────────────────────────
+  // Runs once on mount. Detects environment (website vs Farcaster Mini App),
+  // initialises the correct wallet layer, and dismisses the Farcaster splash.
+  // In a normal browser this is a ~100 ms no-op.
+  useEffect(() => { platform.init().catch(() => {}); }, []);
 
   // ── DB connectivity check ───────────────────────────────────────────────────
   // whether the database is reachable. Check browser DevTools → Console after deploy.
@@ -1709,17 +1676,15 @@ export default function App(){
     return()=>window.removeEventListener("walletchange",sync);
   },[]);
 
-  // Security: a wallet connection alone never authenticates anyone. If MetaMask's active
-  // account changes to one that doesn't match our verified session, end the session rather
-  // than silently showing the new address's data under the old one.
+  // Security: if the active wallet account changes to one that doesn't match
+  // our verified session, end the session. Uses platform.onAccountsChanged()
+  // so this works for both MetaMask (browser) and Farcaster (no-op there).
   useEffect(()=>{
-    if(!window.ethereum?.on) return;
-    const onAccountsChanged=accs=>{
+    const unsub=platform.onAccountsChanged(accs=>{
       const session=S.get("session");
       if(session?.address&&(!accs.length||accs[0].toLowerCase()!==session.address)) onLogout();
-    };
-    window.ethereum.on("accountsChanged",onAccountsChanged);
-    return()=>window.ethereum.removeListener?.("accountsChanged",onAccountsChanged);
+    });
+    return unsub;
   },[]);
 
   useEffect(()=>{
