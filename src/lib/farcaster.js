@@ -67,7 +67,7 @@ export async function initFarcaster() {
     // sdk.isInMiniApp() does a postMessage handshake with the Farcaster host.
     // It resolves quickly (default 100 ms timeout) and returns false in a normal
     // browser without throwing, so it is always safe to call.
-    _isMiniApp = await isInMiniApp();
+    _isMiniApp = await sdk.isInMiniApp();
   } catch {
     _isMiniApp = false;
   }
