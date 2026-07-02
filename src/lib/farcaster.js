@@ -10,7 +10,7 @@
  * the SDK in future is a single-file change.
  */
 
-import { sdk, isInMiniApp } from "@farcaster/miniapp-sdk";
+import { sdk } from "@farcaster/miniapp-sdk";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 // Module-level singletons so the hook can read them synchronously after init.
