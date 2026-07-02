@@ -1,21 +1,22 @@
-// Netlify Function — proxies DB operations to Supabase.
+// Vercel Serverless Function — proxies DB operations to Supabase.
 // The SUPABASE_SERVICE_KEY never leaves this function.
+// Requires Node.js 22.11.0+ (set in package.json engines + vercel.json runtime).
 export default async function handler(req, res) {
-  const event = { httpMethod: req.method, body: JSON.stringify(req.body) };
-  if (event.httpMethod !== "POST") {
+  if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const URL  = process.env.SUPABASE_URL;
-  const KEY  = process.env.SUPABASE_SERVICE_KEY;
+  const URL = process.env.SUPABASE_URL;
+  const KEY = process.env.SUPABASE_SERVICE_KEY;
 
   if (!URL || !KEY) {
     return res.status(503).json({ error: "Database not configured: SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment variables." });
   }
 
-  let body;
-  try { body = JSON.parse(event.body || "{}"); }
-  catch { return res.status(400).json({ error: "Invalid JSON" }); }
+  // Vercel parses application/json bodies automatically — req.body is already
+  // a plain object.  No JSON.parse() needed.  The old adapter did an
+  // unnecessary JSON.stringify(req.body) → JSON.parse() round-trip.
+  const body = req.body || {};
 
   try {
     const result = await dispatch(URL, KEY, body);
@@ -23,7 +24,7 @@ export default async function handler(req, res) {
   } catch (err) {
     return res.status(500).json({ error: err.message || "DB error" });
   }
-};
+}
 
 // ─── Supabase REST helpers ─────────────────────────────────────
 function headers(key, extra = {}) {
